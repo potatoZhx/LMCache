@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from contextlib import asynccontextmanager
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import argparse
 import asyncio
 import uuid
@@ -21,6 +21,8 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     ClearRetMsg,
     CompressMsg,
     CompressRetMsg,
+    GetP2PInfoMsg,
+    GetP2PInfoRetMsg,
     HealthMsg,
     HealthRetMsg,
     LookupMsg,
@@ -253,6 +255,24 @@ def create_app(controller_url: str) -> FastAPI:
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, CheckFinishRetMsg)
             return CheckFinishResponse(status=ret_msg.status)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+    class GetP2PInfoRequest(BaseModel):
+        instance_id: str
+
+    class GetP2PInfoResponse(BaseModel):
+        p2p_info: Dict[str, Dict[str, Union[int, float]]]
+
+    @app.post("/get_p2p_info", response_model=GetP2PInfoResponse)
+    async def get_p2p_info(req: GetP2PInfoRequest):
+        try:
+            msg = GetP2PInfoMsg(
+                instance_id=req.instance_id,
+            )
+            ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert isinstance(ret_msg, GetP2PInfoRetMsg)
+            return GetP2PInfoResponse(p2p_info=ret_msg.p2p_info)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 

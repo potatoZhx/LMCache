@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional
+from collections import defaultdict
+from typing import Dict, List, Optional, Union
 import asyncio
 import ctypes
 import socket
@@ -13,6 +14,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.cache_controller.message import P2PInfoUpdateMsg
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed_server.abstract_server import (  # noqa: E501
     DistributedServerInterface,
@@ -39,6 +41,75 @@ logger = init_logger(__name__)
 # avoided.
 
 
+class PerformanceMetrics:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.storage_lookup_time = 0.0
+        self.data_retrieval_time = 0.0
+        self.tcp_meta_send_time = 0.0
+        self.tcp_data_send_time = 0.0
+        self.total_time = 0.0
+        self.data_size_bytes = 0
+        self.backend_name = "unknown"
+        self.client_addr = "unknown"
+
+
+class PerformanceAnalyzer:
+    """
+    Analyzer for transfer performance.
+    """
+
+    def __init__(self, window_size: int = 100):
+        self.stats = defaultdict(list)
+        self.lock = threading.Lock()
+        self.window_size = window_size
+
+    def add_metrics(self, metrics: PerformanceMetrics):
+        with self.lock:
+            new_record = {
+                "total_time": metrics.total_time,
+                "data_retrieval_time": metrics.data_retrieval_time,
+                "tcp_data_send_time": metrics.tcp_data_send_time,
+                "data_size_bytes": metrics.data_size_bytes,
+                "throughput": metrics.data_size_bytes / 1024 / 1024 / metrics.total_time
+                if metrics.total_time > 0
+                else 0,
+            }
+
+            self.stats[metrics.backend_name].append(new_record)
+
+            if len(self.stats[metrics.backend_name]) > self.window_size:
+                self.stats[metrics.backend_name].pop(0)
+
+    def get_summary_stats(self) -> Dict[str, Dict[str, Union[int, float]]]:
+        with self.lock:
+            summary: Dict[str, Dict[str, Union[int, float]]] = {}
+
+            for backend_name, data_list in self.stats.items():
+                summary[backend_name] = self._calculate_stats(data_list)
+
+            return summary
+
+    def _calculate_stats(self, data_list: List[Dict]) -> Dict[str, Union[int, float]]:
+        if not data_list:
+            return {}
+
+        total_time = [d["total_time"] for d in data_list]
+        retrieval_time = [d["data_retrieval_time"] for d in data_list]
+        tcp_time = [d["tcp_data_send_time"] for d in data_list]
+        throughput = [d["throughput"] for d in data_list]
+
+        return {
+            "count": len(data_list),
+            "avg_total_time": sum(total_time) / len(total_time),
+            "avg_retrieval_time": sum(retrieval_time) / len(retrieval_time),
+            "avg_tcp_time": sum(tcp_time) / len(tcp_time),
+            "avg_throughput_mbps": sum(throughput) / len(throughput),
+        }
+
+
 class NaiveDistributedServer(DistributedServerInterface):
     def __init__(
         self,
@@ -49,6 +120,8 @@ class NaiveDistributedServer(DistributedServerInterface):
     ):
         self.storage_manager = storage_manager
         self.lookup_server = lookup_server
+        self.lmcache_worker = storage_manager.lmcache_worker
+        self.instance_id = config.lmcache_instance_id
 
         self.url = config.distributed_url
         assert self.url is not None
@@ -56,12 +129,22 @@ class NaiveDistributedServer(DistributedServerInterface):
         self.host = host
         self.port = int(port)
 
+        self.metrics = PerformanceMetrics()
+        self.performance_analyzer = PerformanceAnalyzer()
+
         self.loop = loop
         self.thread = threading.Thread(target=self.loop.run_forever)
         self.thread.start()
         asyncio.run_coroutine_threadsafe(self.start(), self.loop)
 
         self.async_socket_lock = asyncio.Lock()
+
+    def _identify_data_source(self, key: CacheEngineKey) -> str:
+        backend_name = self.storage_manager.contains(key)
+        if backend_name is None:
+            return "unknown"
+        else:
+            return backend_name
 
     async def handle_get(
         self,
@@ -71,7 +154,23 @@ class NaiveDistributedServer(DistributedServerInterface):
         Handle get from the peer.
         This function is blocking for now but should be non-blocking.
         """
+        self.metrics.reset()
+
+        t_source_start = time.perf_counter()
+        backend_name = self._identify_data_source(key)
+        t_source_end = time.perf_counter()
+
+        self.metrics.backend_name = backend_name
+        self.metrics.storage_lookup_time = t_source_end - t_source_start
+
+        t_retrieval_start = time.perf_counter()
         memory_obj = self.storage_manager.get(key)
+        t_retrieval_end = time.perf_counter()
+        self.metrics.data_retrieval_time = t_retrieval_end - t_retrieval_start
+
+        if memory_obj is not None:
+            self.metrics.data_size_bytes = len(memory_obj.byte_array)
+
         return memory_obj
 
     async def receive_mem_obj(
@@ -360,6 +459,13 @@ class NaiveDistributedServer(DistributedServerInterface):
                             memory_obj.ref_count_down()
 
                             t3 = time.perf_counter()
+
+                            self.metrics.tcp_meta_send_time = t2 - t1
+                            self.metrics.tcp_data_send_time = t3 - t2
+                            self.metrics.total_time = t3 - t0
+                            self.metrics.client_addr = str(addr)
+                            self.performance_analyzer.add_metrics(self.metrics)
+
                             logger.debug(
                                 f"Time to get data: {t1 - t0}, "
                                 f"time to send meta: {t2 - t1}, "
@@ -381,6 +487,12 @@ class NaiveDistributedServer(DistributedServerInterface):
                         await self.handle_put(meta, reader, writer)
 
         finally:
+            if self.lmcache_worker is not None:
+                p2p_info = self.performance_analyzer.get_summary_stats()
+                if p2p_info != {}:
+                    self.lmcache_worker.put_msg(
+                        P2PInfoUpdateMsg(self.instance_id, p2p_info)
+                    )
             writer.close()
             await writer.wait_closed()
 
