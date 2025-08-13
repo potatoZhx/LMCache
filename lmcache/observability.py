@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Union
 import os
@@ -336,6 +337,57 @@ class LMCStatsMonitor:
     @staticmethod
     def DestroyInstance():
         LMCStatsMonitor._instance = None
+
+
+class P2PStatsMonitor:
+    def __init__(self):
+        self.p2p_stats = defaultdict(list)
+        self.window_size = 100
+
+    @thread_safe
+    def update_p2p_stats(
+        self,
+        backend_name: str,
+        handle_time: float,
+        load_time: float,
+        network_time: float,
+        data_size_bytes: int,
+    ):
+        new_record = {
+            "handle_time": handle_time,
+            "load_time": load_time,
+            "network_time": network_time,
+            "data_size_bytes": data_size_bytes,
+            "throughput": data_size_bytes / 1024 / 1024 / handle_time
+            if handle_time > 0
+            else 0,
+        }
+        self.p2p_stats[backend_name].append(new_record)
+        if len(self.p2p_stats[backend_name]) > self.window_size:
+            self.p2p_stats[backend_name].pop(0)
+
+    @thread_safe
+    def get_p2p_stats_summary(self) -> Dict[str, Dict[str, Union[int, float]]]:
+        summary = {}
+        for backend_name, data_list in self.p2p_stats.items():
+            summary[backend_name] = self._calculate_stats(data_list)
+        return summary
+
+    def _calculate_stats(self, data_list: List[Dict]) -> Dict[str, Union[int, float]]:
+        if not data_list:
+            return {}
+        total_time = [d["handle_time"] for d in data_list]
+        load_time = [d["load_time"] for d in data_list]
+        network_time = [d["network_time"] for d in data_list]
+        throughput = [d["throughput"] for d in data_list]
+
+        return {
+            "count": len(data_list),
+            "avg_handle_time": sum(total_time) / len(total_time),
+            "avg_load_time": sum(load_time) / len(load_time),
+            "avg_network_time": sum(network_time) / len(network_time),
+            "avg_throughput": sum(throughput) / len(throughput),
+        }
 
 
 class PrometheusLogger:

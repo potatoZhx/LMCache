@@ -12,7 +12,7 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.controllers import (
     KVController,
-    P2PInfoController,
+    P2PStatsController,
     RegistrationController,
 )
 from lmcache.v1.cache_controller.executor import LMCacheClusterExecutor
@@ -30,8 +30,8 @@ from lmcache.v1.cache_controller.message import (  # isort: skip
     KVAdmitMsg,
     KVEvictMsg,
     LookupMsg,
-    P2PInfoUpdateMsg,
-    GetP2PInfoMsg,
+    P2PStatsUpdateMsg,
+    GetP2PStatsMsg,
     MoveMsg,
     Msg,
     MsgBase,
@@ -76,7 +76,7 @@ class LMCacheControllerManager:
         )
         self.kv_controller = KVController()
         self.reg_controller = RegistrationController()
-        self.p2p_info_controller = P2PInfoController()
+        self.p2p_stats_controller = P2PStatsController()
         # Cluster executor
         self.cluster_executor = LMCacheClusterExecutor(
             reg_controller=self.reg_controller,
@@ -104,8 +104,8 @@ class LMCacheControllerManager:
             await self.kv_controller.admit(msg)
         elif isinstance(msg, KVEvictMsg):
             await self.kv_controller.evict(msg)
-        elif isinstance(msg, P2PInfoUpdateMsg):
-            await self.p2p_info_controller.update(msg)
+        elif isinstance(msg, P2PStatsUpdateMsg):
+            await self.p2p_stats_controller.update(msg)
         else:
             logger.error(f"Unknown worker message type: {msg}")
 
@@ -128,8 +128,8 @@ class LMCacheControllerManager:
             # FIXME(Jiayi): This `check_finish` thing
             # shouldn't be implemented in kv_controller.
             return await self.kv_controller.check_finish(msg)
-        elif isinstance(msg, GetP2PInfoMsg):
-            return await self.p2p_info_controller.get_p2p_info(msg)
+        elif isinstance(msg, GetP2PStatsMsg):
+            return await self.p2p_stats_controller.get_p2p_stats(msg)
         else:
             logger.error(f"Unknown ochestration message type: {msg}")
             return None

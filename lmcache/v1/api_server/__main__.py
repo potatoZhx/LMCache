@@ -21,8 +21,8 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     ClearRetMsg,
     CompressMsg,
     CompressRetMsg,
-    GetP2PInfoMsg,
-    GetP2PInfoRetMsg,
+    GetP2PStatsMsg,
+    GetP2PStatsRetMsg,
     HealthMsg,
     HealthRetMsg,
     LookupMsg,
@@ -258,21 +258,21 @@ def create_app(controller_url: str) -> FastAPI:
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
-    class GetP2PInfoRequest(BaseModel):
+    class GetP2PStatsRequest(BaseModel):
         instance_id: str
 
-    class GetP2PInfoResponse(BaseModel):
-        p2p_info: Dict[str, Dict[str, Union[int, float]]]
+    class GetP2PStatsResponse(BaseModel):
+        p2p_stats: Dict[str, Dict[str, Union[int, float]]]
 
-    @app.post("/get_p2p_info", response_model=GetP2PInfoResponse)
-    async def get_p2p_info(req: GetP2PInfoRequest):
+    @app.post("/get_p2p_stats", response_model=GetP2PStatsResponse)
+    async def get_p2p_stats(req: GetP2PStatsRequest):
         try:
-            msg = GetP2PInfoMsg(
+            msg = GetP2PStatsMsg(
                 instance_id=req.instance_id,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
-            assert isinstance(ret_msg, GetP2PInfoRetMsg)
-            return GetP2PInfoResponse(p2p_info=ret_msg.p2p_info)
+            assert isinstance(ret_msg, GetP2PStatsRetMsg)
+            return GetP2PStatsResponse(p2p_stats=ret_msg.p2p_stats)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
