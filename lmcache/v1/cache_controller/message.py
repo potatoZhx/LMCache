@@ -86,13 +86,6 @@ class KVEvictMsg(WorkerMsg):
         return f"kv_evict {self.key} from {self.instance_id}"
 
 
-class P2PStatsUpdateMsg(WorkerMsg):
-    """Message for P2P transfer info update"""
-
-    instance_id: str
-    p2p_stats: Dict[str, Dict[str, Union[int, float]]]
-
-
 """Control Message from Controller to LMCache"""
 
 
@@ -264,15 +257,6 @@ class LookupMsg(OrchMsg):
         return f"Lookup tokens {self.tokens}"
 
 
-class GetP2PStatsMsg(OrchMsg):
-    """Get P2P info message"""
-
-    instance_id: str
-
-    def describe(self) -> str:
-        return f"Get P2P info for instance {self.instance_id}"
-
-
 class ClearMsg(OrchMsg):
     """Clear message"""
 
@@ -380,15 +364,6 @@ class LookupRetMsg(OrchRetMsg):
         return f"The layout info is {self.layout_info}"
 
 
-class GetP2PStatsRetMsg(OrchRetMsg):
-    """Get P2P info return message"""
-
-    p2p_stats: Dict[str, Dict[str, Union[int, float]]]
-
-    def describe(self) -> str:
-        return f"The P2P info is {self.p2p_stats}"
-
-
 class ClearRetMsg(OrchRetMsg):
     """Clear return message"""
 
@@ -491,7 +466,4 @@ Msg = Union[
     ErrorMsg,
     QueryInstMsg,
     QueryInstRetMsg,
-    P2PStatsUpdateMsg,
-    GetP2PStatsMsg,
-    GetP2PStatsRetMsg,
 ]

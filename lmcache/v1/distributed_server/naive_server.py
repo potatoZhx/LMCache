@@ -12,9 +12,8 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.observability import P2PStatsMonitor
+from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.cache_controller.message import P2PStatsUpdateMsg
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed_server.abstract_server import (  # noqa: E501
     DistributedServerInterface,
@@ -53,7 +52,7 @@ class NaiveDistributedServer(DistributedServerInterface):
         self.lookup_server = lookup_server
         self.lmcache_worker = storage_manager.lmcache_worker
         self.instance_id = config.lmcache_instance_id
-
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.url = config.distributed_url
         assert self.url is not None
         host, port = self.url.split(":")
@@ -64,8 +63,6 @@ class NaiveDistributedServer(DistributedServerInterface):
         self.thread = threading.Thread(target=self.loop.run_forever)
         self.thread.start()
         asyncio.run_coroutine_threadsafe(self.start(), self.loop)
-
-        self.p2p_stats_monitor = P2PStatsMonitor()
 
         self.async_socket_lock = asyncio.Lock()
 
@@ -357,7 +354,6 @@ class NaiveDistributedServer(DistributedServerInterface):
                         t1 = time.perf_counter()
 
                         if memory_obj is not None:
-                            data_size_bytes = len(memory_obj.byte_array)
                             writer.write(
                                 ServerMetaMessage(
                                     Constants.SERVER_SUCCESS,
@@ -377,13 +373,14 @@ class NaiveDistributedServer(DistributedServerInterface):
 
                             t3 = time.perf_counter()
 
-                            self.p2p_stats_monitor.update_p2p_stats(
-                                backend_name=backend_name,
-                                handle_time=t3 - t0,
-                                load_time=t1 - t0,
-                                network_time=t3 - t1,
-                                data_size_bytes=data_size_bytes,
-                            )
+                            if backend_name == "LocalDiskBackend":
+                                self.stats_monitor.update_p2p_transfer_time_from_disk(
+                                    t3 - t0
+                                )
+                            elif backend_name == "LocalCPUBackend":
+                                self.stats_monitor.update_p2p_transfer_time_from_cpu(
+                                    t3 - t0
+                                )
 
                             logger.debug(
                                 f"Time to get data: {t1 - t0}, "
@@ -406,12 +403,6 @@ class NaiveDistributedServer(DistributedServerInterface):
                         await self.handle_put(meta, reader, writer)
 
         finally:
-            if self.lmcache_worker is not None:
-                p2p_stats = self.p2p_stats_monitor.get_p2p_stats_summary()
-                if p2p_stats != {}:
-                    self.lmcache_worker.put_msg(
-                        P2PStatsUpdateMsg(self.instance_id, p2p_stats)
-                    )
             writer.close()
             await writer.wait_closed()
 

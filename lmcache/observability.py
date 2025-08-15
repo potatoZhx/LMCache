@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Union
 import os
@@ -53,6 +52,9 @@ class LMCacheStats:
     time_to_store: List[float]
     retrieve_speed: List[float]  # Tokens per second
     store_speed: List[float]  # Tokens per second
+
+    avg_p2p_transfer_time_from_disk: float
+    avg_p2p_transfer_time_from_cpu: float
 
 
 @dataclass
@@ -119,6 +121,12 @@ class LMCStatsMonitor:
         self.interval_remote_ping_errors = 0
         self.interval_remote_ping_success = 0
         self.interval_remote_ping_error_code = 0  # 0 means success
+
+        self.interval_p2p_transfer_time_from_disk: List[float] = []
+        self.interval_p2p_transfer_time_from_cpu: List[float] = []
+
+        self.avg_p2p_transfer_time_from_disk: float = -1
+        self.avg_p2p_transfer_time_from_cpu: float = -1
 
         self.local_cache_usage_bytes = 0
         self.remote_cache_usage_bytes = 0
@@ -229,6 +237,14 @@ class LMCStatsMonitor:
         else:
             self.interval_remote_ping_success += 1
 
+    @thread_safe
+    def update_p2p_transfer_time_from_disk(self, transfer_time: float):
+        self.interval_p2p_transfer_time_from_disk.append(transfer_time)
+
+    @thread_safe
+    def update_p2p_transfer_time_from_cpu(self, transfer_time: float):
+        self.interval_p2p_transfer_time_from_cpu.append(transfer_time)
+
     def _clear(self):
         """
         Clear all the distribution stats
@@ -252,6 +268,9 @@ class LMCStatsMonitor:
         self.interval_remote_ping_errors = 0
         self.interval_remote_ping_success = 0
         self.interval_remote_ping_error_code = 0
+
+        self.interval_p2p_transfer_time_from_disk.clear()
+        self.interval_p2p_transfer_time_from_cpu.clear()
 
         new_retrieve_requests = {}
         for request_id, retrieve_stats in self.retrieve_requests.items():
@@ -298,6 +317,15 @@ class LMCStatsMonitor:
             [stats.store_speed() for stats in self.store_requests.values()]
         )
 
+        if self.interval_p2p_transfer_time_from_disk:
+            self.avg_p2p_transfer_time_from_disk = sum(
+                self.interval_p2p_transfer_time_from_disk
+            ) / len(self.interval_p2p_transfer_time_from_disk)
+        if self.interval_p2p_transfer_time_from_cpu:
+            self.avg_p2p_transfer_time_from_cpu = sum(
+                self.interval_p2p_transfer_time_from_cpu
+            ) / len(self.interval_p2p_transfer_time_from_cpu)
+
         ret = LMCacheStats(
             interval_retrieve_requests=self.interval_retrieve_requests,
             interval_store_requests=self.interval_store_requests,
@@ -322,6 +350,8 @@ class LMCStatsMonitor:
             time_to_store=time_to_store,
             retrieve_speed=retrieve_speed,
             store_speed=store_speed,
+            avg_p2p_transfer_time_from_disk=self.avg_p2p_transfer_time_from_disk,
+            avg_p2p_transfer_time_from_cpu=self.avg_p2p_transfer_time_from_cpu,
         )
         self._clear()
         return ret
@@ -337,57 +367,6 @@ class LMCStatsMonitor:
     @staticmethod
     def DestroyInstance():
         LMCStatsMonitor._instance = None
-
-
-class P2PStatsMonitor:
-    def __init__(self):
-        self.p2p_stats = defaultdict(list)
-        self.window_size = 100
-
-    @thread_safe
-    def update_p2p_stats(
-        self,
-        backend_name: str,
-        handle_time: float,
-        load_time: float,
-        network_time: float,
-        data_size_bytes: int,
-    ):
-        new_record = {
-            "handle_time": handle_time,
-            "load_time": load_time,
-            "network_time": network_time,
-            "data_size_bytes": data_size_bytes,
-            "throughput": data_size_bytes / 1024 / 1024 / handle_time
-            if handle_time > 0
-            else 0,
-        }
-        self.p2p_stats[backend_name].append(new_record)
-        if len(self.p2p_stats[backend_name]) > self.window_size:
-            self.p2p_stats[backend_name].pop(0)
-
-    @thread_safe
-    def get_p2p_stats_summary(self) -> Dict[str, Dict[str, Union[int, float]]]:
-        summary = {}
-        for backend_name, data_list in self.p2p_stats.items():
-            summary[backend_name] = self._calculate_stats(data_list)
-        return summary
-
-    def _calculate_stats(self, data_list: List[Dict]) -> Dict[str, Union[int, float]]:
-        if not data_list:
-            return {}
-        total_time = [d["handle_time"] for d in data_list]
-        load_time = [d["load_time"] for d in data_list]
-        network_time = [d["network_time"] for d in data_list]
-        throughput = [d["throughput"] for d in data_list]
-
-        return {
-            "count": len(data_list),
-            "avg_handle_time": sum(total_time) / len(total_time),
-            "avg_load_time": sum(load_time) / len(load_time),
-            "avg_network_time": sum(network_time) / len(network_time),
-            "avg_throughput": sum(throughput) / len(throughput),
-        }
 
 
 class PrometheusLogger:
@@ -484,6 +463,20 @@ class PrometheusLogger:
             documentation="Local storage usage (bytes) of lmcache",
             labelnames=labelnames,
             multiprocess_mode="sum",
+        )
+
+        self.gauge_avg_p2p_transfer_time_from_disk = self._gauge_cls(
+            name="lmcache:avg_p2p_transfer_time_from_disk",
+            documentation="Average p2p transfer time from disk (seconds)",
+            labelnames=labelnames,
+            multiprocess_mode="mostrecent",
+        )
+
+        self.gauge_avg_p2p_transfer_time_from_cpu = self._gauge_cls(
+            name="lmcache:avg_p2p_transfer_time_from_cpu",
+            documentation="Average p2p transfer time from cpu (seconds)",
+            labelnames=labelnames,
+            multiprocess_mode="mostrecent",
         )
 
         time_to_retrieve_buckets = [
@@ -735,6 +728,15 @@ class PrometheusLogger:
         self._log_gauge(self.gauge_remote_cache_usage, stats.remote_cache_usage_bytes)
 
         self._log_gauge(self.gauge_local_storage_usage, stats.local_storage_usage_bytes)
+
+        self._log_gauge(
+            self.gauge_avg_p2p_transfer_time_from_disk,
+            stats.avg_p2p_transfer_time_from_disk,
+        )
+        self._log_gauge(
+            self.gauge_avg_p2p_transfer_time_from_cpu,
+            stats.avg_p2p_transfer_time_from_cpu,
+        )
 
         self._log_histogram(self.histogram_time_to_retrieve, stats.time_to_retrieve)
 
