@@ -253,6 +253,7 @@ class LocalCPUBackend(StorageBackendInterface):
             self.memory_allocator, NixlCPUMemoryAllocator
         )
 
+        evict_keys_count = 0
         with self.cpu_lock:
             while True:
                 # TODO(Jiayi): optimize `num_cacndidates` with estimation.
@@ -262,12 +263,14 @@ class LocalCPUBackend(StorageBackendInterface):
                 )
 
                 if not evict_keys:
+                    self.stats_monitor.update_local_cpu_evict_failed_count(1)
                     logger.warning(
                         "No eviction candidates found in local cpu backend. "
                         "Local cpu memory is under pressure."
                     )
                     break
 
+                evict_keys_count += 1
                 self.batched_remove(evict_keys, force=False)
 
                 # TODO(Jiayi): Move this inside `batched_remove`
@@ -278,6 +281,7 @@ class LocalCPUBackend(StorageBackendInterface):
                 if memory_obj is not None:
                     break
 
+        self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_obj
 
     @_lmcache_nvtx_annotate
@@ -315,6 +319,7 @@ class LocalCPUBackend(StorageBackendInterface):
             self.memory_allocator, NixlCPUMemoryAllocator
         )
 
+        evict_keys_count = 0
         with self.cpu_lock:
             while True:
                 evict_keys = self.cache_policy.get_evict_candidates(
@@ -327,12 +332,14 @@ class LocalCPUBackend(StorageBackendInterface):
                 # pinned in the cpu memory. This might not be true.
 
                 if not evict_keys:
+                    self.stats_monitor.update_local_cpu_evict_failed_count(1)
                     logger.warning(
                         "No eviction candidates found in local cpu backend. "
                         "Local cpu memory is under pressure."
                     )
                     break
 
+                evict_keys_count += 1
                 for evict_key in evict_keys:
                     evict_key_all_layer = evict_key.split_layers(batch_size)
 
@@ -357,6 +364,8 @@ class LocalCPUBackend(StorageBackendInterface):
 
                 if memory_objs:
                     break
+
+        self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_objs
 
     def get_keys(self) -> List[CacheEngineKey]:
